@@ -458,11 +458,7 @@ impl Crawler {
                     }
                     if quality::skip_index_url(&url) {
                         if !parsed.nofollow {
-                            self.take_outlinks(
-                                parsed.links,
-                                item.depth + 1,
-                                item.score,
-                            );
+                            self.take_outlinks(parsed.links, item.depth + 1, item.score);
                         }
                         self.frontier.done(&site, true, delay_ms, resp.elapsed_ms);
                         continue;

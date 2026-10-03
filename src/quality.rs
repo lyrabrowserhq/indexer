@@ -221,8 +221,8 @@ pub fn is_link_maze(text_len: usize, n_links: usize) -> bool {
 /// markov babble: enough tokens but almost no English function words, or nearly unique tokens
 pub fn is_markov_babble(text: &str) -> bool {
     const FW: &[&str] = &[
-        "the", "of", "and", "to", "a", "in", "is", "it", "for", "on", "with", "as", "that",
-        "this", "be", "are", "was", "by", "or", "from", "at", "an", "not", "have", "has",
+        "the", "of", "and", "to", "a", "in", "is", "it", "for", "on", "with", "as", "that", "this",
+        "be", "are", "was", "by", "or", "from", "at", "an", "not", "have", "has",
     ];
     let mut tokens: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -239,10 +239,7 @@ pub fn is_markov_babble(text: &str) -> bool {
     if tokens.len() < 60 {
         return false;
     }
-    let fw = tokens
-        .iter()
-        .filter(|t| FW.iter().any(|w| *t == w))
-        .count();
+    let fw = tokens.iter().filter(|t| FW.iter().any(|w| *t == w)).count();
     let ratio = fw as f64 / tokens.len() as f64;
     let mut uniq = tokens.clone();
     uniq.sort_unstable();
@@ -292,10 +289,9 @@ mod tests {
         assert!(skip_url(&cart));
         assert!(!skip_url(&article));
         let trap = url::Url::parse("https://x.test/nepenthes/aa").unwrap();
-        let maze = url::Url::parse(
-            "https://x.test/a1b2c3d4e5f6a7b8c9d0/deadbeefdeadbeefdeadbeef/page",
-        )
-        .unwrap();
+        let maze =
+            url::Url::parse("https://x.test/a1b2c3d4e5f6a7b8c9d0/deadbeefdeadbeefdeadbeef/page")
+                .unwrap();
         assert!(skip_url(&trap));
         assert!(skip_url(&maze));
     }
