@@ -1,0 +1,51 @@
+# lyra-index configuration
+
+[identity]
+# be honest - site owners should know who we are and how to reach us
+user_agent = "LyraIndex/0.1 (+https://lyrabrowser.com/bot)"
+contact = "https://lyrabrowser.com/about"
+
+[crawl]
+workers = 8
+min_delay_ms = 2000        # floor for per-host politeness
+delay_factor = 2.0         # extra wait as a multiple of last fetch time
+max_delay_ms = 30000       # cap on per-host wait
+max_crawl_delay_ms = 30000 # skip hosts whose robots Crawl-delay exceeds this
+jitter_ms = 250            # random extra wait so hosts are not hit in lockstep
+max_outlinks = 80          # outlinks kept per page after junk filters
+max_pages_per_site = 500   # per-host cap, also covers infinite mazes
+max_retries = 2
+fetch_timeout_secs = 20
+connect_timeout_secs = 8
+max_body_bytes = 2097152   # 2 MiB cap per document
+max_redirects = 5
+max_depth = 3
+slow_drip_min_bytes = 65536     # bytes before drip check engages
+slow_drip_floor_kbps = 8        # abort below this throughput after min bytes
+# generated paths, link mazes, and markov babble are dropped in quality.rs
+
+[frontier]
+max_pending = 100000
+refill_batch = 256
+
+[challenge]
+# anubis pow is solved natively, flaresolverr handles real js challenges
+flaresolverr_url = ""           # e.g. http://flaresolverr:8191/v1
+flaresolverr_timeout_ms = 60000
+
+[store]
+path = "data"
+
+[index]
+writer_heap_mb = 256
+commit_every_docs = 500
+max_docs = 0                 # 0 is unlimited
+max_bytes = 0                # 0 is unlimited INDEX_DIR size
+index_text_bytes = 16384     # stored body used for ranking and snippets
+min_text_chars = 200         # skip thin or empty pages
+
+[api]
+listen = "0.0.0.0:8091"
+
+[blocklists]
+extra_files = []
