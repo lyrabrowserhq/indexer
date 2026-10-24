@@ -30,12 +30,24 @@ pub struct Crawler {
     authority: Arc<dashmap::DashMap<String, u64>>,
     /// pages stored per site - enforces the per-site crawl budget
     site_pages: Arc<dashmap::DashMap<String, u32>>,
-    /// normalized-content hashes for near-dup skipping
-    content_hashes: Arc<dashmap::DashSet<u64>>,
+    /// 64-bit simhashes of normalized page text - near-dup skipping with
+    /// hamming distance, catches mirrors that differ by a few tokens
+    content_sims: Arc<std::sync::RwLock<Vec<u64>>>,
+    logged_limit: std::sync::atomic::AtomicBool,
     /// hosts whose robots sitemaps were already enqueued
     sitemaps_seen: Arc<dashmap::DashSet<String>>,
     docs_done: Arc<AtomicU64>,
     dns_ok: Arc<dashmap::DashMap<String, (std::time::Instant, bool)>>,
+    /// seed urls kept around so the run loop can recrawl stale ones
+    seeds: std::sync::Mutex<Vec<String>>,
+    /// consecutive index write/commit failures - pauses crawling when high
+    pub io_bad: Arc<AtomicU64>,
+    /// process start, for uptime/done-rate metrics
+    started_at: std::time::Instant,
+    /// cached data-dir byte size plus when it was measured - dir walking is
+    /// too expensive to run per leased url
+    bytes_cache: Arc<AtomicU64>,
+    bytes_at: Arc<AtomicU64>,
 }
 
 impl Crawler {
@@ -54,7 +66,7 @@ impl Crawler {
             &cfg.store.path,
             &cfg.blocklists.extra_files,
         ));
-        let frontier = Arc::new(Frontier::new(store.clone(), &cfg.crawl));
+        let frontier = Arc::new(Frontier::new(store.clone(), &cfg.crawl, &cfg.frontier));
         let solver = ChallengeSolver::new(cfg.challenge.clone(), fetcher.client().clone());
         let hister = hister::HisterClient::new(
             &cfg.hister.url,
@@ -75,11 +87,50 @@ impl Crawler {
             hister,
             authority: Arc::new(dashmap::DashMap::new()),
             site_pages: Arc::new(dashmap::DashMap::new()),
-            content_hashes: Arc::new(dashmap::DashSet::new()),
+            content_sims: Arc::new(std::sync::RwLock::new(Vec::new())),
+            logged_limit: std::sync::atomic::AtomicBool::new(false),
             sitemaps_seen: Arc::new(dashmap::DashSet::new()),
             docs_done: Arc::new(AtomicU64::new(0)),
             dns_ok: Arc::new(dashmap::DashMap::new()),
+            seeds: std::sync::Mutex::new(Vec::new()),
+            io_bad: Arc::new(AtomicU64::new(0)),
+            started_at: std::time::Instant::now(),
+            bytes_cache: Arc::new(AtomicU64::new(0)),
+            bytes_at: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    pub fn api_token(&self) -> Option<&str> {
+        self.cfg.api.token()
+    }
+    pub fn api_body_limit(&self) -> usize {
+        self.cfg.api.body_limit
+    }
+
+    pub fn frontier(&self) -> Arc<Frontier> {
+        self.frontier.clone()
+    }
+
+    pub fn uptime_secs(&self) -> u64 {
+        self.started_at.elapsed().as_secs()
+    }
+
+    /// true when the disk keeps failing - workers pause instead of chewing
+    /// through a broken drive
+    pub fn io_unhealthy(&self) -> bool {
+        self.store.unhealthy() || self.io_bad.load(Ordering::Relaxed) >= 3
+    }
+
+    fn note_io<T>(&self, r: &anyhow::Result<T>) {
+        match r {
+            Ok(_) => self.io_bad.store(0, Ordering::Relaxed),
+            Err(_) => {
+                let n = self.io_bad.fetch_add(1, Ordering::Relaxed) + 1;
+                if n == 3 {
+                    warn!("index io errors piling up - crawler will pause");
+                }
+            }
+        }
     }
 
     pub fn index(&self) -> Arc<SearchIndex> {
@@ -106,6 +157,19 @@ impl Crawler {
         crate::index::dir_bytes(&self.cfg.store.path)
     }
 
+    /// cached variant for the hot loop - refreshes at most every 30s
+    fn data_bytes_cached(&self) -> u64 {
+        let now = now_epoch();
+        let last = self.bytes_at.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < 30 {
+            return self.bytes_cache.load(Ordering::Relaxed);
+        }
+        let b = self.data_bytes();
+        self.bytes_cache.store(b, Ordering::Relaxed);
+        self.bytes_at.store(now, Ordering::Relaxed);
+        b
+    }
+
     pub fn data_dir(&self) -> &std::path::Path {
         &self.cfg.store.path
     }
@@ -114,7 +178,7 @@ impl Crawler {
         if self.cfg.index.max_docs > 0 && self.store.doc_count() >= self.cfg.index.max_docs {
             return true;
         }
-        self.cfg.index.max_bytes > 0 && self.data_bytes() >= self.cfg.index.max_bytes
+        self.cfg.index.max_bytes > 0 && self.data_bytes_cached() >= self.cfg.index.max_bytes
     }
 
     fn accept_outlink(&self, u: &url::Url) -> bool {
@@ -157,6 +221,7 @@ impl Crawler {
                 continue;
             }
             self.frontier.push(FrontierItem {
+                attempts: 0,
                 url: nu.to_string(),
                 depth,
                 score,
@@ -175,25 +240,25 @@ impl Crawler {
         max_bytes: Option<u64>,
         max_age_days: Option<u64>,
     ) -> anyhow::Result<usize> {
-        let mut docs = self.store.iter_docs()?;
-        docs.sort_by_key(|d| d.fetched_at);
+        let mut meta = self.store.iter_doc_meta()?;
+        meta.sort_by_key(|d| d.1);
         let now = now_epoch();
         let mut drop: Vec<String> = Vec::new();
         if let Some(days) = max_age_days {
             let cutoff = now.saturating_sub(days.saturating_mul(86_400));
-            for d in &docs {
-                if d.fetched_at < cutoff {
-                    drop.push(d.url.clone());
+            for (url, fetched) in &meta {
+                if *fetched < cutoff {
+                    drop.push(url.clone());
                 }
             }
         }
         if let Some(keep) = keep_docs {
             let keep = keep as usize;
-            if docs.len() > keep {
-                let extra = docs.len() - keep;
-                for d in docs.iter().take(extra) {
-                    if !drop.iter().any(|u| u == &d.url) {
-                        drop.push(d.url.clone());
+            if meta.len() > keep {
+                let extra = meta.len() - keep;
+                for (url, _) in meta.iter().take(extra) {
+                    if !drop.iter().any(|u| u == url) {
+                        drop.push(url.clone());
                     }
                 }
             }
@@ -212,7 +277,7 @@ impl Crawler {
                 if bytes <= cap {
                     break;
                 }
-                let mut rest = self.store.iter_docs()?;
+                let mut rest = self.store.iter_doc_meta()?;
                 if rest.is_empty() {
                     break;
                 }
@@ -222,10 +287,10 @@ impl Crawler {
                 if keep >= count {
                     break;
                 }
-                rest.sort_by_key(|d| d.fetched_at);
-                for d in rest.iter().take(count - keep) {
-                    self.store.delete_doc(&d.url)?;
-                    self.index.delete_url(&d.url)?;
+                rest.sort_by_key(|d| d.1);
+                for (url, _) in rest.iter().take(count - keep) {
+                    self.store.delete_doc(url)?;
+                    self.index.delete_url(url)?;
                     n += 1;
                 }
                 self.index.commit()?;
@@ -238,8 +303,13 @@ impl Crawler {
         Ok(n)
     }
 
-    /// seed the frontier. unseen seeds persist to redb so restarts resume
+    /// seed the frontier. seeds go through the live queue at score 1.0 so
+    /// they lead the crawl; seeds already seen come back once stale, and
+    /// persist_snapshot keeps the queue durable for restarts
     pub fn seed(&self, urls: &[String]) -> usize {
+        self.seeds.lock().unwrap().extend(urls.iter().cloned());
+        let recrawl_secs = self.cfg.crawl.recrawl_secs;
+        let now = crate::index::now_epoch();
         let mut n = 0;
         for raw in urls {
             let Some(u) = urlnorm::normalize(raw) else {
@@ -249,24 +319,154 @@ impl Crawler {
                 continue;
             }
             let key = urlnorm::url_key(&u);
-            if self.store.seen(key) {
-                continue;
-            }
             let item = FrontierItem {
+                attempts: 0,
                 url: u.to_string(),
                 depth: 0,
                 score: 1.0,
             };
-            if self.store.push_frontier(&item, key).is_ok() {
+            if self.store.seen(key) {
+                let stale = self
+                    .store
+                    .seen_at(key)
+                    .map(|ts| now.saturating_sub(ts) >= recrawl_secs)
+                    .unwrap_or(true);
+                if recrawl_secs > 0 && stale && self.frontier.push_recrawl(item) {
+                    n += 1;
+                }
+                continue;
+            }
+            if self.frontier.push(item) {
                 n += 1;
             }
         }
         n
     }
 
-    /// main crawl loop - spawns workers that lease urls under politeness rules
-    pub async fn run(self: Arc<Self>) {
-        info!(workers = self.cfg.crawl.workers, "crawler starting");
+    /// priority seeding: bypasses seen() so already-queued urls jump the
+    /// line and already-fetched ones get an on-demand recrawl
+    pub fn seed_priority(&self, urls: &[String]) -> usize {
+        self.seeds.lock().unwrap().extend(urls.iter().cloned());
+        let mut n = 0;
+        for raw in urls {
+            let Some(u) = urlnorm::normalize(raw) else {
+                continue;
+            };
+            if quality::skip_url(&u) {
+                continue;
+            }
+            let key = urlnorm::url_key(&u);
+            let item = FrontierItem {
+                attempts: 0,
+                url: u.to_string(),
+                depth: 0,
+                score: 1.0,
+            };
+            let _ = self.store.mark_seen(key);
+            let site = urlnorm::site_key(&urlnorm::host_of(&u));
+            self.frontier.push_priority(site, key, item);
+            n += 1;
+        }
+        n
+    }
+
+    /// load persisted simhashes so near-dup checks survive restarts
+    fn warm_simhashes(&self) {
+        match self.store.all_simhashes() {
+            Ok(v) => {
+                let mut w = self.content_sims.write().unwrap();
+                w.extend(v);
+            }
+            Err(e) => warn!(%e, "simhash warmup failed"),
+        }
+    }
+
+    /// requeue stored docs whose last crawl is older than recrawl_secs.
+    /// seeds requeue via reseed_stale above; this covers discovered pages so
+    /// the whole index gets refreshed, capped per pass so the frontier isn't
+    /// swamped at once
+    fn requeue_stale_docs(&self) -> usize {
+        let recrawl_secs = self.cfg.crawl.recrawl_secs;
+        if recrawl_secs == 0 {
+            return 0;
+        }
+        let now = crate::index::now_epoch();
+        let cap = self.cfg.frontier.max_pending.max(1000) / 4;
+        let n = std::cell::Cell::new(0usize);
+        let _ = self.store.for_each_doc(|d| {
+            if n.get() >= cap {
+                return;
+            }
+            let Ok(u) = url::Url::parse(&d.url) else {
+                return;
+            };
+            let key = urlnorm::url_key(&u);
+            let stale = self
+                .store
+                .seen_at(key)
+                .map(|ts| now.saturating_sub(ts) >= recrawl_secs)
+                .unwrap_or(true);
+            if !stale || quality::skip_url(&u) {
+                return;
+            }
+            if self.frontier.push_recrawl(FrontierItem {
+                attempts: 0,
+                url: d.url.clone(),
+                depth: 0,
+                score: 0.5,
+            }) {
+                n.set(n.get() + 1);
+            }
+        });
+        let n = n.get();
+        if n > 0 {
+            info!(n, "stale stored docs requeued for recrawl");
+        }
+        n
+    }
+
+    /// requeue seeds whose last enqueue is older than recrawl_secs
+    fn reseed_stale(&self) -> usize {
+        let recrawl_secs = self.cfg.crawl.recrawl_secs;
+        if recrawl_secs == 0 {
+            return 0;
+        }
+        let now = crate::index::now_epoch();
+        let mut n = 0;
+        for s in self.seeds.lock().unwrap().iter() {
+            let Some(url) = urlnorm::normalize(s) else {
+                continue;
+            };
+            let key = urlnorm::url_key(&url);
+            let stale = self
+                .store
+                .seen_at(key)
+                .map(|ts| now.saturating_sub(ts) >= recrawl_secs)
+                .unwrap_or(true);
+            if stale
+                && self.frontier.push_recrawl(FrontierItem {
+                attempts: 0,
+                url: url.to_string(),
+                    depth: 0,
+                    score: 1.0,
+                })
+            {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    async fn finalize(&self) {
+        self.frontier.flush();
+        self.note_io(&self.index.commit());
+        if self.hister.enabled() {
+            let _ = self.hister.flush().await;
+        }
+    }
+
+    /// one pass over the frontier until it drains
+    async fn crawl_pass(self: &Arc<Self>) {
         let idle_guard = Arc::new(Semaphore::new(1));
 
         // periodic commit so an untimely kill does not lose indexed docs,
@@ -274,12 +474,21 @@ impl Crawler {
         let idx = self.index.clone();
         let fr = self.frontier.clone();
         let hst = self.hister.clone();
+        let io_bad = self.io_bad.clone();
         let maint = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(30)).await;
-                let _ = idx.commit();
+                match idx.commit() {
+                    Ok(_) => io_bad.store(0, Ordering::Relaxed),
+                    Err(_) => {
+                        io_bad.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
                 fr.persist_snapshot();
                 let _ = hst.flush().await;
+                // glibc keeps freed memory in per-thread arenas - return it
+                // so RSS tracks real use instead of the peak watermark
+                unsafe { libc::malloc_trim(0) };
             }
         });
 
@@ -295,20 +504,121 @@ impl Crawler {
             let _ = h.await;
         }
         maint.abort();
-        self.frontier.flush();
-        let _ = self.index.commit();
-        if self.hister.enabled() {
-            let _ = self.hister.flush().await;
-        }
+    }
+
+    /// batch mode: one pass then stop
+    pub async fn run(self: Arc<Self>) {
+        info!(workers = self.cfg.crawl.workers, "crawler starting");
+        self.crawl_pass().await;
+        self.finalize().await;
         info!("crawler stopped");
+    }
+
+    /// give a failed url another pass, up to the configured retry count
+    fn retry_item(&self, mut item: FrontierItem) {
+        if item.attempts < self.cfg.crawl.max_retries.min(255) as u8 {
+            item.attempts += 1;
+            let _ = self.frontier.push_recrawl(item);
+        }
+    }
+
+    /// re-add every stored doc to tantivy - heals cases where a doc made it
+    /// to the store but its index write failed under merge load. docs already
+    /// indexed keep their authority and inlink scores
+    pub fn reindex(&self) -> anyhow::Result<usize> {
+        let n = std::cell::Cell::new(0usize);
+        self.store.for_each_doc(|d| {
+            if self.index.has_url(&d.url) {
+                return;
+            }
+            let Ok(text) = zstd::decode_all(d.text_z.as_slice()) else {
+                return;
+            };
+            let text = String::from_utf8_lossy(&text);
+            if self
+                .index
+                .add_doc(&d.url, &d.host, &d.title, &text, "", d.fetched_at, 0.0, 0)
+                .is_ok()
+            {
+                n.set(n.get() + 1);
+                if n.get() % 500 == 0 {
+                    let _ = self.index.commit();
+                }
+            }
+        })?;
+        let n = n.get();
+        if n > 0 {
+            self.index.commit()?;
+        }
+        Ok(n)
+    }
+
+    /// drop stored docs that fail the current skip filters so rule updates
+    /// clean the index without waiting for a recrawl
+    pub fn scrub_index(&self) -> usize {
+        let mut drop_urls: Vec<String> = Vec::new();
+        let _ = self.store.for_each_doc(|d| {
+            let drop = Url::parse(&d.url)
+                .map(|u| quality::skip_index_url(&u))
+                .unwrap_or(true)
+                || quality::junk_title(&d.title);
+            if drop {
+                drop_urls.push(d.url.clone());
+            }
+        });
+        let mut n = 0;
+        for d_url in &drop_urls {
+            let _ = self.store.delete_doc(d_url);
+            let _ = self.index.delete_url(d_url);
+            n += 1;
+        }
+        if n > 0 {
+            self.note_io(&self.index.commit());
+            info!(n, "scrubbed junk docs from index");
+        }
+        n
+    }
+
+    /// continuous mode: after the frontier drains, keep checking for seeds
+    /// that went stale and recrawl them
+    pub async fn run_forever(self: Arc<Self>) {
+        // clear anything the skip rules now reject, once per process start
+        let c = self.clone();
+        tokio::task::spawn_blocking(move || c.scrub_index());
+        self.warm_simhashes();
+        loop {
+            info!(workers = self.cfg.crawl.workers, "crawl pass starting");
+            self.crawl_pass().await;
+            self.finalize().await;
+            if self.reseed_stale() > 0 {
+                continue;
+            }
+            if self.requeue_stale_docs() > 0 {
+                continue;
+            }
+            let wait = self.cfg.crawl.recrawl_check_secs.max(60);
+            info!(wait, "frontier drained, waiting for stale docs");
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+        }
     }
 
     async fn worker(&self, _wid: usize, idle_guard: Arc<Semaphore>) {
         loop {
+            if self.io_unhealthy() {
+                // disk is erroring - back off and keep checking, the api
+                // keeps serving whatever is already indexed
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                continue;
+            }
             if self.over_limit() {
-                info!("index at size limit");
+                // throttle the notice - each worker hits this line on every
+                // loop and a quiet index should not fill the disk with logs
+                if !self.logged_limit.swap(true, Ordering::Relaxed) {
+                    info!("index at size limit - crawler paused");
+                }
                 return;
             }
+            self.logged_limit.store(false, Ordering::Relaxed);
             if self.frontier.is_idle() {
                 // acquire means "i saw it idle"; if it still is, exit
                 let _permit = idle_guard.try_acquire();
@@ -334,7 +644,14 @@ impl Crawler {
                 self.frontier.done(&site, true, 0, 0);
                 continue;
             };
-            if quality::skip_url(&url) {
+            // sitemap xml paths are blocked by skip_url extensions, but they
+            // are how robots tells us the inventory - let them through so a
+            // fetched sitemap can fan out into real page urls
+            let sitemap_url = {
+                let p = url.path().to_ascii_lowercase();
+                p.contains("sitemap") && (p.ends_with(".xml") || p.ends_with(".xml.gz"))
+            };
+            if !sitemap_url && quality::skip_url(&url) {
                 self.frontier.done(&site, true, 0, 0);
                 continue;
             }
@@ -381,7 +698,8 @@ impl Crawler {
                 for sm in self.robots.sitemaps_for(&url).await {
                     if let Ok(su) = Url::parse(&sm) {
                         self.frontier.push(FrontierItem {
-                            url: su.to_string(),
+                attempts: 0,
+                url: su.to_string(),
                             depth: item.depth.saturating_add(1),
                             score: item.score,
                         });
@@ -408,6 +726,17 @@ impl Crawler {
                 .await
             {
                 Ok(resp) => {
+                    // redirects can cross hosts - re-check blocklist and
+                    // routability on wherever we actually landed
+                    let final_host = urlnorm::host_of(&resp.final_url);
+                    if final_host != host
+                        && (self.blocklist.blocked(&final_host)
+                            || !self.host_routable(&final_host).await)
+                    {
+                        debug!(%url, %final_host, "redirect to blocked host, dropping");
+                        self.frontier.done(&site, true, delay_ms, 0);
+                        continue;
+                    }
                     let body = resp.body;
                     let kind = ChallengeSolver::looks_challenged(&body, resp.status.as_u16());
                     let body = match kind {
@@ -474,15 +803,43 @@ impl Crawler {
                         self.frontier.done(&site, true, delay_ms, 0);
                         continue;
                     }
+                    // maze check requires most links to stay on the same
+                    // host. listy-but-legit pages like blogrolls and wiki
+                    // indexes link mostly outward, so they do not trip it
+                    let own = urlnorm::site_key(&host);
+                    let own_links = parsed
+                        .links
+                        .iter()
+                        .filter(|l| {
+                            urlnorm::normalize(l)
+                                .map(|nu| urlnorm::site_key(&urlnorm::host_of(&nu)) == own)
+                                .unwrap_or(false)
+                        })
+                        .count();
+                    let self_dominated =
+                        !parsed.links.is_empty() && own_links * 10 >= parsed.links.len() * 7;
                     if !media
                         && !quality::is_wiki_host(&host)
                         && !quality::is_forum_url(&url)
-                        && (quality::is_link_maze(parsed.text.len(), parsed.links.len())
+                        && ((self_dominated
+                            && quality::is_link_maze(parsed.text.len(), parsed.links.len()))
                             || quality::is_markov_babble(&parsed.text))
                     {
                         warn!(%url, links = parsed.links.len(), "possible content tarpit");
+                        // keep only the cross-host links for discovery so a
+                        // maze cannot reseed itself
+                        let cross = parsed
+                            .links
+                            .iter()
+                            .filter(|l| {
+                                urlnorm::normalize(l)
+                                    .map(|nu| urlnorm::site_key(&urlnorm::host_of(&nu)) != own)
+                                    .unwrap_or(false)
+                            })
+                            .cloned();
+                        self.take_outlinks(cross, item.depth + 1, item.score);
                         let fails = self.frontier.failures(&site);
-                        if fails > 1 {
+                        if fails > 2 {
                             let _ = self.store.ban_host(&site, now_epoch() + 3600);
                         }
                         self.frontier.done(&site, false, delay_ms, 0);
@@ -501,21 +858,25 @@ impl Crawler {
                         }
                     }
 
-                    // near-dup content check - same normalized text seen
-                    // before means mirror/parked content, skip indexing
+                    // near-dup content check - simhash over token 3-grams;
+                    // hamming <= 3 against any stored doc means mirror/parked
+                    // content or a tag-page variant, skip indexing
                     let norm: String = parsed
                         .text
                         .split_whitespace()
                         .collect::<Vec<_>>()
                         .join(" ")
                         .to_lowercase();
-                    let chash =
-                        xxhash_rust::xxh3::xxh3_64(norm.get(..4096).unwrap_or(&norm).as_bytes());
-                    if !self.content_hashes.insert(chash) {
-                        debug!(%url, "duplicate content skipped");
-                        self.frontier.done(&site, true, delay_ms, 0);
-                        continue;
+                    let sim = simhash64(&norm);
+                    {
+                        let seen = self.content_sims.read().unwrap();
+                        if seen.iter().any(|h| (h ^ sim).count_ones() <= 3) {
+                            debug!(%url, "near-duplicate content skipped");
+                            self.frontier.done(&site, true, delay_ms, 0);
+                            continue;
+                        }
                     }
+                    self.content_sims.write().unwrap().push(sim);
 
                     let title = quality::display_title(&parsed.title, &parsed.text);
                     let text = quality::clip_text(&parsed.text, self.cfg.index.index_text_bytes);
@@ -548,13 +909,14 @@ impl Crawler {
                         links: parsed.links.clone(),
                         etag: resp.etag.clone(),
                         last_modified: resp.last_modified.clone(),
+                        simhash: sim,
                     };
                     let _ = self.store.put_doc(&doc);
                     if self.hister.enabled() {
                         self.hister
                             .queue(&doc.url, &host, &doc.title, &text, doc.fetched_at);
                     }
-                    let _ = self.index.add_doc(
+                    let add = self.index.add_doc(
                         &doc.url,
                         &host,
                         &title,
@@ -564,10 +926,11 @@ impl Crawler {
                         authority,
                         parsed.links.len() as u64,
                     );
+                    self.note_io(&add);
 
                     let n = self.docs_done.fetch_add(1, Ordering::Relaxed) + 1;
                     if n.is_multiple_of(self.cfg.index.commit_every_docs as u64) {
-                        let _ = self.index.commit();
+                        self.note_io(&self.index.commit());
                     }
 
                     // enqueue outlinks within depth
@@ -601,16 +964,23 @@ impl Crawler {
                         self.frontier.penalize(&site, wait_s);
                     }
                     _ => match &e {
+                        // not html (pdf, binary) is a neutral skip, not a
+                        // host failure - one pdf must not cost a strike
+                        FetchError::NotHtml => {
+                            self.frontier.done(&site, true, delay_ms, 0);
+                        }
                         FetchError::SlowDrip | FetchError::Timeout => {
                             warn!(host, error = %e, "possible tarpit");
                             let fails = self.frontier.failures(&site);
                             if fails > 3 {
                                 let _ = self.store.ban_host(&site, now_epoch() + 3600);
                             }
+                            self.retry_item(item);
                             self.frontier.done(&site, false, delay_ms, 0);
                         }
                         _ => {
                             debug!(%url, error = %e, "fetch failed");
+                            self.retry_item(item);
                             self.frontier.done(&site, false, delay_ms, 0);
                         }
                     },
@@ -626,7 +996,7 @@ impl Crawler {
         use std::io::BufWriter;
         let mut n = 0usize;
         let mut w = BufWriter::new(std::fs::File::create(out)?);
-        for doc in self.store.iter_docs()? {
+        self.store.for_each_doc(|doc| {
             let text = zstd::decode_all(doc.text_z.as_slice()).unwrap_or_default();
             let line = serde_json::json!({
                 "url": doc.url,
@@ -635,10 +1005,10 @@ impl Crawler {
                 "fetched_at": doc.fetched_at,
                 "text": String::from_utf8_lossy(&text),
             });
-            serde_json::to_writer(&mut w, &line)?;
-            std::io::Write::write_all(&mut w, b"\n")?;
+            let _ = serde_json::to_writer(&mut w, &line);
+            let _ = std::io::Write::write_all(&mut w, b"\n");
             n += 1;
-        }
+        })?;
         std::io::Write::flush(&mut w)?;
         Ok(n)
     }
@@ -651,7 +1021,7 @@ impl Crawler {
         let mut n = 0usize;
         let mut w = std::io::BufWriter::new(std::fs::File::create(out)?);
         writeln!(w, "[")?;
-        for doc in self.store.iter_docs()? {
+        self.store.for_each_doc(|doc| {
             let text = zstd::decode_all(doc.text_z.as_slice()).unwrap_or_default();
             let line = serde_json::json!({
                 "url": doc.url,
@@ -664,12 +1034,12 @@ impl Crawler {
                 "label": "lyra-index",
             });
             if n > 0 {
-                writeln!(w, ",")?;
+                let _ = writeln!(w, ",");
             }
-            serde_json::to_writer(&mut w, &line)?;
-            writeln!(w)?;
+            let _ = serde_json::to_writer(&mut w, &line);
+            let _ = writeln!(w);
             n += 1;
-        }
+        })?;
         writeln!(w, "]")?;
         w.flush()?;
         Ok(n)
@@ -708,6 +1078,7 @@ impl Crawler {
                 fetched_at: fetched,
                 text_z: zstd::encode_all(text.as_bytes(), 3)?,
                 links: vec![],
+                simhash: crate::crawl::simhash64_pub(text),
                 ..Default::default()
             };
             self.store.put_doc(&doc)?;
@@ -717,4 +1088,45 @@ impl Crawler {
         }
         Ok(n)
     }
+}
+
+/// 64-bit simhash over word 3-grams of normalized text. two pages that share
+/// most tokens hash within a few bits, so hamming distance is a cheap fuzzy
+/// duplicate test
+pub(crate) fn simhash64_pub(text: &str) -> u64 {
+    simhash64(text)
+}
+
+fn simhash64(text: &str) -> u64 {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return 0;
+    }
+    let mut bits = [0i64; 64];
+    let grams: Box<dyn Iterator<Item = String>> = if words.len() < 3 {
+        Box::new(words.iter().map(|w| w.to_string()))
+    } else {
+        Box::new(
+            words
+                .windows(3)
+                .map(|w| format!("{} {} {}", w[0], w[1], w[2])),
+        )
+    };
+    for g in grams {
+        let h = xxhash_rust::xxh3::xxh3_64(g.as_bytes());
+        for i in 0..64 {
+            if h & (1u64 << i) != 0 {
+                bits[i] += 1;
+            } else {
+                bits[i] -= 1;
+            }
+        }
+    }
+    let mut out = 0u64;
+    for (i, &b) in bits.iter().enumerate() {
+        if b > 0 {
+            out |= 1u64 << i;
+        }
+    }
+    out
 }

@@ -29,9 +29,13 @@ static TRACKING_PARAMS: &[&str] = &[
 // globally breaks sites that use the same names for sessions and state:
 // si=, app=, feature=, ref_= are all legitimate on other hosts.
 static SITE_TRACKING_PARAMS: &[(&str, &[&str])] = &[
-    // youtube share links append si/app/feature for tracking
-    ("youtube.com", &["si", "app", "feature", "persist_app"]),
-    ("youtu.be", &["si"]),
+    // youtube share links append si/app/feature/pp/t for tracking and seek
+    // position. none of them change which page is served
+    (
+        "youtube.com",
+        &["si", "app", "feature", "persist_app", "pp", "t", "kw", "origin"],
+    ),
+    ("youtu.be", &["si", "t", "feature"]),
     // google result/share links append ved/ei/sclient/referrer
     ("google.", &["ved", "ei", "sclient", "referrer"]),
     // aliexpress internal tracking

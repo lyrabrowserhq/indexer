@@ -124,9 +124,18 @@ impl RobotsCache {
                         allow_all: true,
                     }
                 } else if status.is_success() {
-                    let text = resp.text().await.unwrap_or_default();
-                    // cap parse size, giant robots.txt files exist in the wild
-                    let text: String = text.chars().take(512 * 1024).collect();
+                    // stop reading at the parse cap so a giant or slow
+                    // robots.txt cannot eat the crawl budget
+                    let mut resp = resp;
+                    let mut buf = Vec::new();
+                    while let Ok(Some(chunk)) = resp.chunk().await {
+                        buf.extend_from_slice(&chunk);
+                        if buf.len() >= 512 * 1024 {
+                            break;
+                        }
+                    }
+                    buf.truncate(512 * 1024);
+                    let text = String::from_utf8_lossy(&buf).into_owned();
                     RobotsEntry {
                         text,
                         fetched_at: Instant::now(),

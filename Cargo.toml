@@ -16,6 +16,7 @@ feed-rs = "2.4.0"
 futures = "0.3.34"
 hex = "0.4.3"
 landlock = "0.4.7"
+libc = "0.2.190"
 parking_lot = "0.12.5"
 rand = "0.10.3"
 redb = "4.3.0"
@@ -30,6 +31,7 @@ thiserror = "2.0.21"
 time = "0.3.55"
 tokio = { version = "1.53.1", features = ["full"] }
 toml = "1.1.6"
+tower-http = { version = "0.7.1", features = ["limit"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"

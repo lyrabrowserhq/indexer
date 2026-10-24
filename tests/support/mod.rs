@@ -22,7 +22,7 @@ pub fn make_crawler(cfg: Config) -> anyhow::Result<Crawler> {
 }
 
 pub fn app_state(c: Crawler) -> AppState {
-    AppState::from_crawler(&c).expect("app state")
+    AppState::from_crawler(&std::sync::Arc::new(c)).expect("app state")
 }
 
 pub use lyra_index::server::router;

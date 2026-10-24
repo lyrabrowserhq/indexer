@@ -1,0 +1,11 @@
+# high-signal domains for cc seeding - one per line
+news.ycombinator.com
+stackoverflow.com
+arstechnica.com
+bbc.com
+reuters.com
+theguardian.com
+theverge.com
+wikipedia.org
+lobste.rs
+lemmy.world

@@ -41,7 +41,7 @@ pub fn extract(body: &str, base: &Url) -> Extracted {
         SEL_OG_DESC.get_or_init(|| Selector::parse("meta[property=\"og:description\"]").unwrap());
     let sel_drop = SEL_DROP.get_or_init(|| {
         Selector::parse(
-            "script, style, noscript, template, iframe, svg, nav, footer, header, form, aside, table.infobox, table.navbox, table.sidebar, .mw-editsection, sup.reference, ol.references, .noprint, #mw-navigation, #mw-panel, #siteNotice, .mw-jump-link, #jump-to-nav, .hatnote, .dablink",
+            "script, style, noscript, template, iframe, svg, nav, footer, header, form, aside, table.infobox, table.navbox, table.sidebar, .mw-editsection, sup.reference, ol.references, .noprint, #mw-navigation, #mw-panel, #siteNotice, .mw-jump-link, #jump-to-nav, .hatnote, .dablink, [role=navigation], [role=banner], [role=contentinfo], dialog, .cookie-banner, .consent-banner, #cookie-consent, .gdpr-banner, .advertisement, .adsbygoogle",
         )
         .unwrap()
     });
@@ -168,9 +168,14 @@ pub fn extract(body: &str, base: &Url) -> Extracted {
         text.push(' ');
     }
 
-    // cap stored text - pages can be huge, ranking only needs the front
+    // cap stored text - pages can be huge, ranking only needs the front.
+    // truncate panics on a non-char boundary, so walk back to one first
     if text.len() > 64 * 1024 {
-        text.truncate(64 * 1024);
+        let mut cut = 64 * 1024;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
     }
 
     Extracted {
@@ -286,14 +291,24 @@ pub fn feed_links(body: &str) -> Vec<String> {
     for cap in rest.split("<link").skip(1) {
         if let Some(a) = cap.find("href=") {
             let q = &cap[a + 5..];
-            let end = q.find('"').or_else(|| q.find('\''));
-            let start = if q.starts_with('"') || q.starts_with('\'') {
-                1
+            let (start, terminator) = if q.starts_with('"') {
+                (1usize, '"')
+            } else if q.starts_with('\'') {
+                (1usize, '\'')
             } else {
-                0
+                (0usize, '>')
             };
-            if let Some(e) = end {
-                let l = q[start..e].trim();
+            let rest_q = &q[start..];
+            // closing quote must be found after the opening char; unquoted
+            // values end at the first of space, quote, or tag close
+            let end = if start == 1 {
+                rest_q.find(terminator)
+            } else {
+                rest_q
+                    .find(|c: char| c == '>' || c == ' ' || c == '"' || c == '\'')
+            };
+            if let Some(rel) = end {
+                let l = rest_q[..rel].trim();
                 if l.starts_with("http") {
                     links.push(l.to_string());
                 }
@@ -411,5 +426,18 @@ mod tests {
         let _ = feed_links(&s);
         let _ = is_sitemap(&s);
         let _ = sitemap_urls(&s);
+    }
+
+    #[test]
+    fn atom_link_href_does_not_panic() {
+        let feed = r#"<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
+        <entry><title>a</title><link href="https://x.test/post-1"/></entry>
+        <entry><title>b</title><link href='https://x.test/post-2' rel="alternate"/></entry>
+        <entry><title>c</title><link href=https://x.test/post-3/></entry>
+        </feed>"#;
+        let links = feed_links(feed);
+        assert!(links.iter().any(|l| l == "https://x.test/post-1"));
+        assert!(links.iter().any(|l| l == "https://x.test/post-2"));
+        assert!(links.iter().any(|l| l == "https://x.test/post-3/"));
     }
 }

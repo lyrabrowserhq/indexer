@@ -70,6 +70,9 @@ enum Cmd {
         #[arg(short, long, default_value = "jsonl", value_parser = ["jsonl", "hister"])]
         format: String,
     },
+    /// re-add every stored document to tantivy - heals gaps where a doc was
+    /// stored but its index write failed under merge load
+    Reindex,
     /// import documents into the index - accepts our jsonl and hister export
     /// files (hister field names url/domain/text/added map onto ours)
     Import {
@@ -114,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
             crawler.run().await;
         }
         Cmd::Serve => {
-            let crawler = crawl::Crawler::new(cfg.clone())?;
+            let crawler = Arc::new(crawl::Crawler::new(cfg.clone())?);
             let state = server::AppState::from_crawler(&crawler)?;
             server::serve(state, &cfg.api.listen).await?;
         }
@@ -132,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
             let listen = cfg.api.listen.clone();
             let api = tokio::spawn(async move { server::serve(state, &listen).await });
             let c2 = crawler.clone();
-            let crawl_task = tokio::spawn(async move { c2.run().await });
+            let crawl_task = tokio::spawn(async move { c2.run_forever().await });
             let _ = tokio::join!(api, crawl_task);
         }
         Cmd::Stats => {
@@ -193,7 +196,7 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("set [hister] url or LYRA_INDEX_HISTER_URL first");
             }
             let mut n = 0usize;
-            for doc in crawler.store().iter_docs()? {
+            crawler.store().for_each_doc(|doc| {
                 let text = zstd::decode_all(doc.text_z.as_slice()).unwrap_or_default();
                 hister.queue(
                     &doc.url,
@@ -203,9 +206,14 @@ async fn main() -> anyhow::Result<()> {
                     doc.fetched_at,
                 );
                 n += 1;
-            }
+            })?;
             let sent = hister.flush().await?;
             println!("pushed {sent}/{n} docs to {}", cfg.hister.url);
+        }
+        Cmd::Reindex => {
+            let crawler = crawl::Crawler::new(cfg)?;
+            let n = crawler.reindex()?;
+            println!("reindexed {n} docs");
         }
         Cmd::Import { input } => {
             let crawler = crawl::Crawler::new(cfg)?;

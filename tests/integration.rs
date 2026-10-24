@@ -480,3 +480,77 @@ fn reference_hosts_rank_above_random() {
     let hits = idx.search("firefox privacy", 5).unwrap();
     assert_eq!(hits[0].url, "https://en.wikipedia.org/wiki/Firefox");
 }
+
+#[test]
+fn site_ops_and_host_diversity() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = support::test_config(dir.path());
+    let crawler = support::make_crawler(cfg).unwrap();
+    let idx = crawler.index();
+    let body = "rust traits generics lifetimes and ownership explained ".repeat(6);
+    for i in 0..5 {
+        idx.add_doc(
+            &format!("https://farm.test/rust-{i}"),
+            "farm.test",
+            &format!("Rust page {i}"),
+            &body,
+            "",
+            0,
+            0.0,
+            0,
+        )
+        .unwrap();
+    }
+    idx.add_doc(
+        "https://docs.rs/rust",
+        "docs.rs",
+        "Rust docs",
+        &body,
+        "",
+        0,
+        0.0,
+        0,
+    )
+    .unwrap();
+    idx.commit().unwrap();
+
+    // diversity caps farm.test at MAX_PER_SITE
+    let hits = idx.search("rust traits", 10).unwrap();
+    let farm = hits.iter().filter(|h| h.host == "farm.test").count();
+    assert!(farm <= 3, "expected <=3 same-site hits, got {farm}");
+
+    // site: restrict
+    let hits = idx.search("rust site:docs.rs", 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].host, "docs.rs");
+
+    // -site: exclude
+    let hits = idx.search("rust traits -site:farm.test", 10).unwrap();
+    assert!(hits.iter().all(|h| h.host != "farm.test"));
+
+    // site: alone is a valid query and bypasses the diversity cap
+    let hits = idx.search("site:farm.test", 10).unwrap();
+    assert_eq!(hits.len(), 5);
+
+    // garbage operator degrades instead of erroring
+    let hits = idx.search("rust define:traits", 10).unwrap();
+    assert!(hits.len() <= 6);
+
+    // a stray term falls back to disjunction instead of zero results
+    let hits = idx.search("rust zzznopeqq", 10).unwrap();
+    assert!(!hits.is_empty(), "expected disjunction fallback hits");
+}
+#[test]
+fn site_operator_full_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = support::test_config(dir.path());
+    let crawler = support::make_crawler(cfg).unwrap();
+    let idx = crawler.index();
+    for i in 0..5 {
+        idx.add_doc(&format!("https://en.wikipedia.org/wiki/Page_{i}"), "en.wikipedia.org", &format!("Wiki {i}"), "the body text here is fine prose for indexing ".repeat(4).as_str(), "", 0, 0.0, 0).unwrap();
+    }
+    idx.add_doc("https://docs.rs/x", "docs.rs", "Docs", "something else entirely different ".repeat(4).as_str(), "", 0, 0.0, 0).unwrap();
+    idx.commit().unwrap();
+    let hits = idx.search_kind("site:en.wikipedia.org", 10, None).unwrap();
+    assert_eq!(hits.len(), 5, "site: should return all 5 wiki docs, got {}", hits.len());
+}

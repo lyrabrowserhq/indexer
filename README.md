@@ -10,7 +10,9 @@ Serve the search API from an existing index:
 INDEX_DIR=./data BIND=127.0.0.1:8091 cargo run --release -- serve
 ```
 
-Crawl and serve in one process:
+Crawl and serve in one process. `run` keeps going after the frontier drains:
+seeds older than `crawl.recrawl_secs` (default 86400) are re-fetched on a
+recrawl pass, checked every `crawl.recrawl_check_secs`:
 
 ```
 INDEX_DIR=./data BIND=127.0.0.1:8091 cargo run --release -- run --seeds-file seeds.txt --max-docs 50000
@@ -66,8 +68,8 @@ INDEX_DIR=./data cargo run --release -- prune --max-age-days 90
 - `GET /healthz` JSON status and session doc count
 - `GET /stats` stored docs, index docs, and data bytes
 - `GET /search?q=&limit=&offset=&kind=` crawler JSON
-- `GET /v1/search?q=&limit=&kind=` JSON hits for Seek
-- `GET /v1/search.rss?q=` RSS 2.0 for the Seek `lyra` engine
+- `GET /v1/search?q=&limit=&offset=&kind=` JSON hits for Seek (includes `host`, `ts`, `took_ms`)
+- `GET /v1/search.rss?q=&limit=&offset=` RSS 2.0 for the Seek `lyra` engine (includes `pubDate`)
 - `POST /v1/index` JSON `{url,title,body,kind}` kind is `page` or `rss`
 - `GET /v1/feeds` listed RSS origins
 - `POST /v1/feeds` JSON `{url}` fetch and index
@@ -75,8 +77,25 @@ INDEX_DIR=./data cargo run --release -- prune --max-age-days 90
 
 Private, loopback, and link-local URLs are rejected. Challenge walls,
 thin pages, cart/login URLs, binary files, and Mediawiki File, Talk, and
-Special pages are not indexed. Search requires every query term and
-returns a body snippet for Seek.
+Special pages are not indexed.
+
+## Query language
+
+Plain terms must all match. If nothing matches, the search falls back to
+a disjunctive query so one stray word does not mean zero results.
+
+Operators:
+
+- `site:example.com` only that host and its subdomains
+- `-site:example.com` exclude a host
+- `-term` exclude a term, `"quoted phrase"` phrase match
+- `intitle:word` require the word in the title
+- `inurl:word` require the word in the URL
+- `before:2024` / `after:2024-06-01` filter by fetch date
+- `field:term` works for `title`, `host`, `kind`, `url`, `description`
+
+Unknown `word:` prefixes degrade to plain terms instead of erroring.
+Results carry at most 3 hits per site and a body snippet for Seek.
 
 One request is in flight per host. The next wait is the larger of
 `min_delay_ms`, robots `Crawl-delay`, and last-fetch-time times

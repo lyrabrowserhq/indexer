@@ -77,6 +77,11 @@ pub struct Crawl {
     pub jitter_ms: u64,
     /// outlinks kept per page after junk filters
     pub max_outlinks: usize,
+    /// requeue a seed once it is this old. 0 disables recrawling
+    pub recrawl_secs: u64,
+    /// how often the run loop checks for stale seeds after the frontier
+    /// drains
+    pub recrawl_check_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -118,6 +123,23 @@ pub struct IndexCfg {
 #[serde(default)]
 pub struct Api {
     pub listen: String,
+    /// bearer token required on mutating endpoints; empty means open (local
+    /// dev). never commit a real token to the repo
+    pub token: String,
+    /// max bytes for json bodies on mutating endpoints
+    #[serde(default = "default_body_limit")]
+    pub body_limit: usize,
+}
+
+impl Api {
+    /// Default() can't know - callers that need a token set it explicitly
+    pub fn token(&self) -> Option<&str> {
+        if self.token.is_empty() {
+            None
+        } else {
+            Some(self.token.as_str())
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -160,6 +182,8 @@ impl Default for Crawl {
             max_crawl_delay_ms: 30_000,
             jitter_ms: 250,
             max_outlinks: 80,
+            recrawl_secs: 86_400,
+            recrawl_check_secs: 900,
         }
     }
 }
@@ -207,6 +231,8 @@ impl Default for Api {
     fn default() -> Self {
         Self {
             listen: "0.0.0.0:8091".into(),
+            token: String::new(),
+            body_limit: 1 << 20,
         }
     }
 }
@@ -223,6 +249,14 @@ impl Config {
     pub fn apply_env(&mut self) {
         if let Ok(v) = std::env::var("BIND").or_else(|_| std::env::var("LYRA_INDEX_LISTEN")) {
             self.api.listen = v;
+        }
+        if let Ok(v) = std::env::var("LYRA_API_TOKEN") {
+            self.api.token = v;
+        }
+        if let Ok(v) = std::env::var("LYRA_API_BODY_LIMIT") {
+            if let Ok(n) = v.parse() {
+                self.api.body_limit = n;
+            }
         }
         if let Ok(v) = std::env::var("INDEX_DIR").or_else(|_| std::env::var("LYRA_INDEX_DIR")) {
             self.store.path = std::path::PathBuf::from(v);
@@ -278,4 +312,8 @@ impl Config {
             self.index.min_text_chars = n;
         }
     }
+}
+
+fn default_body_limit() -> usize {
+    1 << 20
 }

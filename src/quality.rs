@@ -28,8 +28,19 @@ pub fn junk_title(title: &str) -> bool {
         "captcha",
         "enable javascript",
         "pardon our interruption",
+        "rate limited",
+        "are you a robot",
+        "unusual traffic",
     ];
-    BAD.iter().any(|b| t.contains(b))
+    if BAD.iter().any(|b| t.contains(b)) {
+        return true;
+    }
+    // bare auth titles are never useful results, only exact matches so
+    // articles about sign-in still pass
+    matches!(
+        t.as_str(),
+        "sign in" | "log in" | "login" | "signin" | "sign up" | "create account"
+    )
 }
 
 pub fn display_title(title: &str, text: &str) -> String {
@@ -63,6 +74,35 @@ pub fn clip_text(text: &str, max_bytes: usize) -> String {
 /// mediawiki namespaces, binary files, and session/cart URLs are not indexed
 pub fn skip_url(url: &url::Url) -> bool {
     let path = url.path();
+    // wayback machine pages are proxy copies of other sites, not real
+    // results, and the host is huge enough to eat a crawl budget
+    if let Some(host) = url.host_str() {
+        if host.eq_ignore_ascii_case("web.archive.org")
+            && (path.starts_with("/web/") || path.starts_with("/save/"))
+        {
+            return true;
+        }
+        // wikimedia interlanguage links fan a page out into every sister
+        // edition; keep the english ones only
+        let h = host.to_ascii_lowercase();
+        const FAMILY: &[&str] = &[
+            "wikipedia.org",
+            "wiktionary.org",
+            "wikiquote.org",
+            "wikivoyage.org",
+            "wikibooks.org",
+            "wikisource.org",
+        ];
+        for d in FAMILY {
+            let suffix = format!(".{d}");
+            if let Some(sub) = h.strip_suffix(suffix.as_str()) {
+                let lang = sub.split('.').next().unwrap_or("");
+                if !matches!(lang, "en" | "simple" | "www") {
+                    return true;
+                }
+            }
+        }
+    }
     if path.contains("/w/index.php") {
         return true;
     }
@@ -89,7 +129,7 @@ pub fn skip_url(url: &url::Url) -> bool {
     const EXT: &[&str] = &[
         ".pdf", ".zip", ".gz", ".tgz", ".tar", ".exe", ".dmg", ".iso", ".mp3", ".mp4", ".avi",
         ".mkv", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".woff", ".woff2",
-        ".ttf", ".css", ".js",
+        ".ttf", ".css", ".js", ".xml", ".rss", ".atom", ".opml", ".ics",
     ];
     if EXT.iter().any(|e| lower.ends_with(e)) {
         return true;
@@ -153,9 +193,90 @@ pub fn skip_url(url: &url::Url) -> bool {
 
 /// hub pages are crawled for outlinks but not stored in the index
 pub fn skip_index_url(url: &url::Url) -> bool {
+    if let Some(host) = url.host_str()
+        && host.eq_ignore_ascii_case("web.archive.org")
+        && url.path().starts_with("/web/")
+    {
+        return true;
+    }
     let leaf = url.path().rsplit('/').next().unwrap_or("");
     const HUB: &[&str] = &["Portal:", "Category:"];
-    HUB.iter().any(|n| leaf.starts_with(n))
+    if HUB.iter().any(|n| leaf.starts_with(n)) {
+        return true;
+    }
+    let segs: Vec<&str> = url.path().split('/').filter(|s| !s.is_empty()).collect();
+    for (i, s) in segs.iter().enumerate() {
+        let sl = s.to_ascii_lowercase();
+        // amp mirrors and wordpress-style archive prefixes are listing pages
+        if sl == "amp" {
+            return true;
+        }
+        if (sl == "tag" || sl == "category" || sl == "author" || sl == "page")
+            && i + 1 < segs.len()
+        {
+            return true;
+        }
+    }
+    // auth walls and account flows have no searchable prose. checking the
+    // first or last segment only, so docs mentioning accounts still index
+    let edge = |s: &str| {
+        matches!(
+            s,
+            "login"
+                | "signin"
+                | "sign-in"
+                | "logout"
+                | "oauth"
+                | "oauth2"
+                | "openid"
+                | "sso"
+                | "register"
+                | "signup"
+                | "cart"
+                | "checkout"
+        )
+    };
+    if segs
+        .first()
+        .is_some_and(|s| edge(&s.to_ascii_lowercase()))
+        || segs.last().is_some_and(|s| edge(&s.to_ascii_lowercase()))
+    {
+        return true;
+    }
+    // member and user profile pages
+    if segs.len() >= 2
+        && matches!(
+            segs[0].to_ascii_lowercase().as_str(),
+            "members" | "member" | "users" | "user" | "u"
+        )
+    {
+        return true;
+    }
+    // date archives end in /yyyy, /yyyy/mm, or /yyyy/mm/dd. a deeper leaf is
+    // a real post and stays indexed
+    let all_digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    let is_year = |s: &str| {
+        s.len() == 4
+            && all_digits(s)
+            && s.parse::<u32>().map(|y| (1900..=2100).contains(&y)).unwrap_or(false)
+    };
+    let is_monthday = |s: &str| s.len() <= 2 && all_digits(s);
+    if let Some(last) = segs.last() {
+        let n = segs.len();
+        if is_year(last) {
+            return true;
+        }
+        if is_monthday(last) && n >= 2 && (is_year(segs[n - 2]) || is_monthday(segs[n - 2])) {
+            return true;
+        }
+    }
+    // search and share endpoints are not content
+    if let Some(q) = url.query() {
+        if q.contains("replytocom") || q.starts_with("s=") || q.contains("&s=") || q.contains("share=") {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn is_media_host(host: &str) -> bool {
@@ -213,9 +334,11 @@ fn looks_generated_segment(seg: &str) -> bool {
     alnum == s.len() && s.bytes().any(|b| b.is_ascii_digit()) && s.len() >= 24
 }
 
-/// maze pages pack many unique links and little prose (Nepenthes, Iocaine, Labyrinth)
+/// maze pages pack huge link counts with near-zero prose (Nepenthes,
+/// Iocaine, Labyrinth). the bar is intentionally extreme: callers also
+/// check same-host dominance so nav-heavy real pages pass
 pub fn is_link_maze(text_len: usize, n_links: usize) -> bool {
-    n_links >= 12 && text_len < n_links.saturating_mul(48)
+    n_links >= 48 && text_len < 2000
 }
 
 /// markov babble: enough tokens but almost no English function words, or nearly unique tokens
@@ -298,8 +421,10 @@ mod tests {
 
     #[test]
     fn catches_link_mazes_and_babble() {
-        assert!(is_link_maze(200, 20));
-        assert!(!is_link_maze(8000, 20));
+        assert!(is_link_maze(200, 60));
+        assert!(!is_link_maze(200, 40));
+        assert!(!is_link_maze(3000, 200));
+        assert!(!is_link_maze(8000, 200));
         let babble = "qx zr vw pl mk nj bh gt ys df ".repeat(20);
         assert!(is_markov_babble(&babble));
         let prose = "the cat sat on the mat and the dog sat on the rug with the hat for the rat in the hut as the sun was on the hill and the wind was in the tree for the bird and the fish ".repeat(3);
