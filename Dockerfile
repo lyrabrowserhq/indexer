@@ -1,15 +1,21 @@
 # syntax=docker/dockerfile:1
 
-FROM docker.io/library/rust:1.98.1-alpine3.24@sha256:7cc1c22d77d9432f7fe012a70e6d3e555af54c2a6832700ed7d553f1769ae89f AS build
+FROM docker.io/library/rust:1.99.0-alpine3.24@sha256:0cce0a5e0e8ba67b455257a3a02a1d99005f382748789d6464460028810f1627 AS build
 WORKDIR /app
 # hadolint ignore=DL3018
 RUN apk add --no-cache musl-dev
 COPY Cargo.toml Cargo.lock ./
+RUN mkdir src \
+    && echo 'fn main() {}' > src/main.rs \
+    && touch src/lib.rs \
+    && cargo build --release \
+    && rm -rf src target/release/lyra-index target/release/deps/lyra_index*
 COPY seeds.txt ./
 COPY src ./src
-RUN cargo build --release && strip target/release/lyra-index
+RUN touch src/main.rs src/lib.rs \
+    && cargo build --release && strip target/release/lyra-index
 
-FROM docker.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM docker.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 # hadolint ignore=DL3018
 RUN apk add --no-cache ca-certificates wget \
     && adduser -D -H -u 65532 -s /sbin/nologin lyra \
