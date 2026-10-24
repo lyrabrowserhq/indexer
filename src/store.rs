@@ -298,10 +298,7 @@ impl Store {
     fn wtxn_volatile(&self) -> anyhow::Result<redb::WriteTransaction> {
         let r = self.db.begin_write().map_err(anyhow::Error::from);
         self.note(&r);
-        let mut w = match r {
-            Ok(w) => w,
-            Err(e) => return Err(e),
-        };
+        let mut w = r?;
         w.set_durability(redb::Durability::None)?;
         Ok(w)
     }

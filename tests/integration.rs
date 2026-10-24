@@ -547,10 +547,37 @@ fn site_operator_full_scan() {
     let crawler = support::make_crawler(cfg).unwrap();
     let idx = crawler.index();
     for i in 0..5 {
-        idx.add_doc(&format!("https://en.wikipedia.org/wiki/Page_{i}"), "en.wikipedia.org", &format!("Wiki {i}"), "the body text here is fine prose for indexing ".repeat(4).as_str(), "", 0, 0.0, 0).unwrap();
+        idx.add_doc(
+            &format!("https://en.wikipedia.org/wiki/Page_{i}"),
+            "en.wikipedia.org",
+            &format!("Wiki {i}"),
+            "the body text here is fine prose for indexing "
+                .repeat(4)
+                .as_str(),
+            "",
+            0,
+            0.0,
+            0,
+        )
+        .unwrap();
     }
-    idx.add_doc("https://docs.rs/x", "docs.rs", "Docs", "something else entirely different ".repeat(4).as_str(), "", 0, 0.0, 0).unwrap();
+    idx.add_doc(
+        "https://docs.rs/x",
+        "docs.rs",
+        "Docs",
+        "something else entirely different ".repeat(4).as_str(),
+        "",
+        0,
+        0.0,
+        0,
+    )
+    .unwrap();
     idx.commit().unwrap();
     let hits = idx.search_kind("site:en.wikipedia.org", 10, None).unwrap();
-    assert_eq!(hits.len(), 5, "site: should return all 5 wiki docs, got {}", hits.len());
+    assert_eq!(
+        hits.len(),
+        5,
+        "site: should return all 5 wiki docs, got {}",
+        hits.len()
+    );
 }

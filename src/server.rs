@@ -155,7 +155,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/feeds", get(list_feeds).post(add_feed))
         .route("/v1/feeds/refresh", post(refresh_feeds))
         .route("/metrics", get(metrics))
-        .layer(tower_http::limit::RequestBodyLimitLayer::new(4 * 1024 * 1024))
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            4 * 1024 * 1024,
+        ))
         .with_state(state)
 }
 
@@ -224,8 +226,7 @@ async fn search(
 }
 
 async fn healthz(State(s): State<AppState>) -> Json<HealthResponse> {
-    let io_ok = s.io_bad.load(std::sync::atomic::Ordering::Relaxed) < 3
-        && !s.store.unhealthy();
+    let io_ok = s.io_bad.load(std::sync::atomic::Ordering::Relaxed) < 3 && !s.store.unhealthy();
     Json(HealthResponse {
         status: if io_ok { "ok" } else { "degraded" },
         docs: s.doc_count.load(std::sync::atomic::Ordering::Relaxed),
@@ -251,8 +252,7 @@ async fn stats(State(s): State<AppState>) -> Json<StatsResponse> {
         bytes: crate::index::dir_bytes(&s.data_dir),
         uptime_secs,
         docs_per_min: if uptime_secs > 0 {
-            (s.doc_count.load(std::sync::atomic::Ordering::Relaxed) as f64
-                / uptime_secs as f64)
+            (s.doc_count.load(std::sync::atomic::Ordering::Relaxed) as f64 / uptime_secs as f64)
                 * 60.0
         } else {
             0.0
@@ -344,9 +344,7 @@ async fn search_rss(
     if hits.len() < 3 {
         let idx = s.index.clone();
         let qq = p.q.clone();
-        if let Ok(Some(dym)) =
-            tokio::task::spawn_blocking(move || idx.suggest(&qq)).await
-        {
+        if let Ok(Some(dym)) = tokio::task::spawn_blocking(move || idx.suggest(&qq)).await {
             xml.push_str("<didyoumean>");
             xml.push_str(&escape_xml(&dym));
             xml.push_str("</didyoumean>");
@@ -431,7 +429,9 @@ struct SeedIn {
 /// seed score and join the recrawl set
 /// bearer check - only enforced when a token is configured
 fn authed(headers: &axum::http::HeaderMap, s: &AppState) -> Result<(), ApiError> {
-    let Some(tok) = &s.api_token else { return Ok(()) };
+    let Some(tok) = &s.api_token else {
+        return Ok(());
+    };
     let want = format!("Bearer {tok}");
     let ok = headers
         .get(axum::http::header::AUTHORIZATION)
@@ -517,11 +517,7 @@ async fn metrics(State(s): State<AppState>) -> Response {
     let body = format!(
         "lyra_docs {docs}\n         lyra_index_docs {index_docs}\n         lyra_index_bytes {bytes}\n         lyra_queue_pending {queue_pending}\n         lyra_queue_disk {queue_disk}\n         lyra_workers_in_flight {in_flight}\n         lyra_io_errors {io_errors}\n         lyra_io_degraded {degraded}\n         lyra_queries_total {qt}\n         lyra_queries_ms_total {qms}\n         lyra_uptime_secs {uptime}\n"
     );
-    (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
-        body,
-    )
-        .into_response()
+    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }
 
 fn rss_date(ts: u64) -> String {

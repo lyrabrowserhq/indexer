@@ -445,8 +445,8 @@ impl Crawler {
                 .unwrap_or(true);
             if stale
                 && self.frontier.push_recrawl(FrontierItem {
-                attempts: 0,
-                url: url.to_string(),
+                    attempts: 0,
+                    url: url.to_string(),
                     depth: 0,
                     score: 1.0,
                 })
@@ -488,7 +488,10 @@ impl Crawler {
                 let _ = hst.flush().await;
                 // glibc keeps freed memory in per-thread arenas - return it
                 // so RSS tracks real use instead of the peak watermark
-                unsafe { libc::malloc_trim(0) };
+                #[cfg(target_env = "gnu")]
+                unsafe {
+                    libc::malloc_trim(0)
+                };
             }
         });
 
@@ -541,7 +544,7 @@ impl Crawler {
                 .is_ok()
             {
                 n.set(n.get() + 1);
-                if n.get() % 500 == 0 {
+                if n.get().is_multiple_of(500) {
                     let _ = self.index.commit();
                 }
             }
@@ -698,8 +701,8 @@ impl Crawler {
                 for sm in self.robots.sitemaps_for(&url).await {
                     if let Ok(su) = Url::parse(&sm) {
                         self.frontier.push(FrontierItem {
-                attempts: 0,
-                url: su.to_string(),
+                            attempts: 0,
+                            url: su.to_string(),
                             depth: item.depth.saturating_add(1),
                             score: item.score,
                         });
@@ -1114,11 +1117,11 @@ fn simhash64(text: &str) -> u64 {
     };
     for g in grams {
         let h = xxhash_rust::xxh3::xxh3_64(g.as_bytes());
-        for i in 0..64 {
+        for (i, bit) in bits.iter_mut().enumerate() {
             if h & (1u64 << i) != 0 {
-                bits[i] += 1;
+                *bit += 1;
             } else {
-                bits[i] -= 1;
+                *bit -= 1;
             }
         }
     }

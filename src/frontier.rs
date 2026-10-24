@@ -3,10 +3,10 @@ use crate::store::{FrontierItem, Store};
 use crate::urlnorm;
 use dashmap::DashMap;
 use rand::RngExt;
-use std::collections::{BinaryHeap, VecDeque};
 use std::cmp::Reverse;
-use std::sync::{Arc, Mutex};
+use std::collections::{BinaryHeap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 use url::Url;
@@ -130,9 +130,7 @@ impl Frontier {
                 .get(&site)
                 .map(|s| s.next_allowed)
                 .unwrap_or_else(std::time::Instant::now);
-            self.ready.lock()
-                .unwrap()
-                .push(Reverse((at, depth, site)));
+            self.ready.lock().unwrap().push(Reverse((at, depth, site)));
         }
         true
     }
@@ -174,12 +172,11 @@ impl Frontier {
             drop(dq);
             self.queued.remove(&key);
             let _ = self.store.remove_frontier(key);
-            let mut state =
-                self.sites.entry(site.clone()).or_insert_with(|| SiteState {
-                    next_allowed: Instant::now(),
-                    failures: 0,
-                    in_flight: false,
-                });
+            let mut state = self.sites.entry(site.clone()).or_insert_with(|| SiteState {
+                next_allowed: Instant::now(),
+                failures: 0,
+                in_flight: false,
+            });
             state.in_flight = true;
             self.pending.fetch_sub(1, Ordering::Relaxed);
             return Some((key, item, site));
@@ -211,8 +208,7 @@ impl Frontier {
         let mut chosen: Option<String> = None;
         {
             let mut heap = self.ready.lock().unwrap();
-            loop {
-                let Some(Reverse((at, _d, _s))) = heap.peek() else { break };
+            while let Some(Reverse((at, _d, _s))) = heap.peek() {
                 let at = *at;
                 if at > now {
                     break;
@@ -252,11 +248,14 @@ impl Frontier {
         drop(q);
         self.queued.remove(&key);
         let _ = self.store.remove_frontier(key);
-        let mut state = self.sites.entry(site.to_string()).or_insert_with(|| SiteState {
-            next_allowed: Instant::now(),
-            failures: 0,
-            in_flight: false,
-        });
+        let mut state = self
+            .sites
+            .entry(site.to_string())
+            .or_insert_with(|| SiteState {
+                next_allowed: Instant::now(),
+                failures: 0,
+                in_flight: false,
+            });
         state.in_flight = true;
         self.pending.fetch_sub(1, Ordering::Relaxed);
         Some((key, item, site.to_string()))
@@ -311,10 +310,7 @@ impl Frontier {
         );
         let at = Instant::now() + Duration::from_millis(wait);
         state.next_allowed = at;
-        let has_more = self
-            .queues
-            .get(site)
-            .is_some_and(|q| !q.is_empty());
+        let has_more = self.queues.get(site).is_some_and(|q| !q.is_empty());
         drop(state);
         if has_more {
             let depth = self
@@ -322,7 +318,8 @@ impl Frontier {
                 .get(site)
                 .and_then(|q| q.front().map(|(_, it)| it.depth))
                 .unwrap_or(0);
-            self.ready.lock()
+            self.ready
+                .lock()
                 .unwrap()
                 .push(Reverse((at, depth, site.to_string())));
         }

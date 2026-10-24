@@ -131,9 +131,7 @@ fn parse_epoch(s: &str, end_of: bool) -> Option<u64> {
             } else {
                 (year, Month::try_from(u8::from(month) + 1).ok()?)
             };
-            date = Date::from_calendar_date(ny, nm, 1)
-                .ok()?
-                .previous_day()?;
+            date = Date::from_calendar_date(ny, nm, 1).ok()?.previous_day()?;
         }
     }
     let t = if end_of {
@@ -290,11 +288,7 @@ impl QuerySpec {
             return false;
         }
         let url_l = url.to_lowercase();
-        if self
-            .inurl_terms
-            .iter()
-            .any(|t| !url_l.contains(&**t))
-        {
+        if self.inurl_terms.iter().any(|t| !url_l.contains(&**t)) {
             return false;
         }
         if let Some(b) = self.before
@@ -465,12 +459,7 @@ impl SearchIndex {
                 let Ok(inv) = seg.inverted_index(self.body) else {
                     continue;
                 };
-                let Ok(mut stream) = inv
-                    .terms()
-                    .range()
-                    .ge(prefix.as_bytes())
-                    .into_stream()
-                else {
+                let Ok(mut stream) = inv.terms().range().ge(prefix.as_bytes()).into_stream() else {
                     continue;
                 };
                 while let Some((term, info)) = stream.next() {
@@ -528,7 +517,11 @@ impl SearchIndex {
         qp
     }
 
-    fn parse_lenient(&self, text: &str, conjunction: bool) -> Option<Box<dyn tantivy::query::Query>> {
+    fn parse_lenient(
+        &self,
+        text: &str,
+        conjunction: bool,
+    ) -> Option<Box<dyn tantivy::query::Query>> {
         if text.trim().is_empty() {
             return None;
         }
@@ -564,15 +557,11 @@ impl SearchIndex {
         // operator-only queries bypass the text parser. site: gets a host
         // regex so it matches the whole host set rather than a scored
         // sample; anything else walks the whole index and filters
-        let query: Box<dyn tantivy::query::Query> = if all_query
-            && !spec.site_includes.is_empty()
-        {
+        let query: Box<dyn tantivy::query::Query> = if all_query && !spec.site_includes.is_empty() {
             let mut clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
             for d in &spec.site_includes {
                 let pat = format!("(.*\\.)?{}", regex_escape(d));
-                if let Ok(rq) =
-                    tantivy::query::RegexQuery::from_pattern(&pat, self.host)
-                {
+                if let Ok(rq) = tantivy::query::RegexQuery::from_pattern(&pat, self.host) {
                     clauses.push((
                         Occur::Should,
                         Box::new(rq) as Box<dyn tantivy::query::Query>,
@@ -600,7 +589,7 @@ impl SearchIndex {
         // operator-only queries have no score signal to lean on, so scan the
         // whole index rather than a top-k sample
         let top_n = if all_query {
-            (searcher.num_docs() as usize).min(20_000).max(200)
+            (searcher.num_docs() as usize).clamp(200, 20_000)
         } else {
             (limit * 6).max(200)
         };
@@ -628,9 +617,7 @@ impl SearchIndex {
                     "(.*\\.)?{}\\.(com|org|net|io|dev|app|network|co|gg|tv)",
                     regex_escape(t)
                 );
-                if let Ok(rq) =
-                    tantivy::query::RegexQuery::from_pattern(&pat, self.host)
-                {
+                if let Ok(rq) = tantivy::query::RegexQuery::from_pattern(&pat, self.host) {
                     clauses.push((
                         Occur::Should,
                         Box::new(rq) as Box<dyn tantivy::query::Query>,
@@ -657,17 +644,20 @@ impl SearchIndex {
         // fallback does not surface single-word noise
         if hits.is_empty() {
             if let Some(two) = self.min_terms_query(&text, 2) {
-                let alt: Vec<(f32, DocAddress)> = searcher
-                    .search(&*two, &TopDocs::with_limit(top_n).order_by_score())?;
+                let alt: Vec<(f32, DocAddress)> =
+                    searcher.search(&*two, &TopDocs::with_limit(top_n).order_by_score())?;
                 if !alt.is_empty() {
                     let mut snipper = SnippetGenerator::create(&searcher, &*two, self.body)?;
                     snipper.set_max_num_chars(240);
                     return self.collect(&searcher, alt, &spec, kind, limit, Some(&snipper));
                 }
             }
-            if let Some(or_query) = self.anchored_query(&text).or_else(|| self.parse_lenient(&text, false)) {
-                let alt: Vec<(f32, DocAddress)> = searcher
-                    .search(&*or_query, &TopDocs::with_limit(top_n).order_by_score())?;
+            if let Some(or_query) = self
+                .anchored_query(&text)
+                .or_else(|| self.parse_lenient(&text, false))
+            {
+                let alt: Vec<(f32, DocAddress)> =
+                    searcher.search(&*or_query, &TopDocs::with_limit(top_n).order_by_score())?;
                 if alt.len() > hits.len() {
                     hits = alt;
                     let mut snipper = SnippetGenerator::create(&searcher, &*or_query, self.body)?;
@@ -684,11 +674,7 @@ impl SearchIndex {
 
     /// union of all 2-term conjunctions over the query tokens: the
     /// "most words must match" tier between strict AND and full OR
-    fn min_terms_query(
-        &self,
-        text: &str,
-        min: usize,
-    ) -> Option<Box<dyn tantivy::query::Query>> {
+    fn min_terms_query(&self, text: &str, min: usize) -> Option<Box<dyn tantivy::query::Query>> {
         let mut toks: Vec<String> = text
             .split(|c: char| !c.is_alphanumeric())
             .filter(|t| t.len() >= 2)
@@ -802,14 +788,13 @@ impl SearchIndex {
         snipper: Option<&SnippetGenerator>,
     ) -> anyhow::Result<Vec<SearchHit>> {
         /* collect more than the page size so the diversity pass can pick a
-           spread of senses instead of the raw bm25 order */
+        spread of senses instead of the raw bm25 order */
         let pool = (limit * 4).max(20);
         let mut out: Vec<SearchHit> = Vec::with_capacity(pool);
         let mut per_site: HashMap<String, usize> = HashMap::new();
         // regional mirrors share title text across site keys (amazon.sg vs
         // amazon.com) so dedupe on normalized title as well as site
-        let mut seen_titles: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut seen_titles: std::collections::HashSet<String> = std::collections::HashSet::new();
         let now = now_epoch();
         for (bm25, addr) in hits {
             if out.len() >= pool {
@@ -1179,7 +1164,7 @@ fn url_query_boost(url: &str, q: &str) -> f32 {
     }
     let slug = url
         .split(&['/', '?', '#'][..])
-        .last()
+        .next_back()
         .unwrap_or("")
         .to_lowercase();
     let path = url.to_lowercase();
@@ -1223,10 +1208,34 @@ fn sense_key(hit: &SearchHit, query: &str) -> String {
 fn is_stopword(t: &str) -> bool {
     matches!(
         t,
-        "the" | "this" | "that" | "with" | "from" | "your" | "what" | "when"
-            | "where" | "which" | "about" | "how" | "why" | "and" | "for"
-            | "guide" | "best" | "top" | "review" | "reviews" | "new" | "2024"
-            | "2025" | "2026" | "page" | "site" | "website" | "home"
+        "the"
+            | "this"
+            | "that"
+            | "with"
+            | "from"
+            | "your"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "about"
+            | "how"
+            | "why"
+            | "and"
+            | "for"
+            | "guide"
+            | "best"
+            | "top"
+            | "review"
+            | "reviews"
+            | "new"
+            | "2024"
+            | "2025"
+            | "2026"
+            | "page"
+            | "site"
+            | "website"
+            | "home"
     )
 }
 
@@ -1335,6 +1344,57 @@ pub fn dir_bytes(path: &Path) -> u64 {
     walk(path)
 }
 
+/// classic levenshtein with an early-out distance cap
+fn levenshtein(a: &str, b: &str, max: u32) -> u32 {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.len().abs_diff(b.len()) > max as usize {
+        return u32::MAX;
+    }
+    let mut prev: Vec<u32> = (0..=b.len() as u32).collect();
+    let mut cur = vec![0u32; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i as u32 + 1;
+        for (j, cb) in b.iter().enumerate() {
+            cur[j + 1] = (prev[j + 1] + 1)
+                .min(cur[j] + 1)
+                .min(prev[j] + if ca == cb { 0 } else { 1 });
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// queries that mean "what's happening" get a steeper freshness weight
+fn query_is_newsy(text: &str) -> bool {
+    let t = text.to_lowercase();
+    for w in [
+        "news",
+        "latest",
+        "breaking",
+        "today",
+        "yesterday",
+        "tonight",
+        "announced",
+        "launch",
+        "release",
+        "deadline",
+        "update",
+        "election",
+        "results",
+        "score",
+        "weather",
+        "forecast",
+        "stock",
+        "price",
+    ] {
+        if t.contains(w) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1342,14 +1402,41 @@ mod tests {
     #[test]
     fn nav_host_boost_single_term() {
         // single-term entity query - the named site wins
-        assert_eq!(nav_host_boost("en.wikipedia.org", "https://en.wikipedia.org/wiki/X", "wikipedia"), 6.0);
-        assert_eq!(nav_host_boost("reticulum.network", "https://reticulum.network/", "reticulum"), 6.0);
+        assert_eq!(
+            nav_host_boost(
+                "en.wikipedia.org",
+                "https://en.wikipedia.org/wiki/X",
+                "wikipedia"
+            ),
+            6.0
+        );
+        assert_eq!(
+            nav_host_boost(
+                "reticulum.network",
+                "https://reticulum.network/",
+                "reticulum"
+            ),
+            6.0
+        );
         // multi-term: no host floor, only path-segment boost
-        assert_eq!(nav_host_boost("privacy.com", "https://privacy.com/", "bazzell privacy"), 1.0);
+        assert_eq!(
+            nav_host_boost("privacy.com", "https://privacy.com/", "bazzell privacy"),
+            1.0
+        );
         // path segment exact match gives the small boost
-        assert_eq!(nav_host_boost("github.com", "https://github.com/owner/Reticulum", "reticulum"), 1.9);
+        assert_eq!(
+            nav_host_boost(
+                "github.com",
+                "https://github.com/owner/Reticulum",
+                "reticulum"
+            ),
+            1.9
+        );
         // unrelated host
-        assert_eq!(nav_host_boost("example.com", "https://example.com/a", "wikipedia"), 1.0);
+        assert_eq!(
+            nav_host_boost("example.com", "https://example.com/a", "wikipedia"),
+            1.0
+        );
     }
 
     #[test]
@@ -1399,40 +1486,4 @@ mod tests {
     fn sanitize_works() {
         assert_eq!(sanitize_query("foo (bar] \"baz"), "foo bar baz");
     }
-}
-
-/// classic levenshtein with an early-out distance cap
-fn levenshtein(a: &str, b: &str, max: u32) -> u32 {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    if a.len().abs_diff(b.len()) > max as usize {
-        return u32::MAX;
-    }
-    let mut prev: Vec<u32> = (0..=b.len() as u32).collect();
-    let mut cur = vec![0u32; b.len() + 1];
-    for (i, ca) in a.iter().enumerate() {
-        cur[0] = i as u32 + 1;
-        for (j, cb) in b.iter().enumerate() {
-            cur[j + 1] = (prev[j + 1] + 1)
-                .min(cur[j] + 1)
-                .min(prev[j] + if ca == cb { 0 } else { 1 });
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    prev[b.len()]
-}
-
-/// queries that mean "what's happening" get a steeper freshness weight
-fn query_is_newsy(text: &str) -> bool {
-    let t = text.to_lowercase();
-    for w in [
-        "news", "latest", "breaking", "today", "yesterday", "tonight",
-        "announced", "launch", "release", "deadline", "update", "election",
-        "results", "score", "weather", "forecast", "stock", "price",
-    ] {
-        if t.contains(w) {
-            return true;
-        }
-    }
-    false
 }

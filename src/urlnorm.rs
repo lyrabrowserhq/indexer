@@ -33,7 +33,16 @@ static SITE_TRACKING_PARAMS: &[(&str, &[&str])] = &[
     // position. none of them change which page is served
     (
         "youtube.com",
-        &["si", "app", "feature", "persist_app", "pp", "t", "kw", "origin"],
+        &[
+            "si",
+            "app",
+            "feature",
+            "persist_app",
+            "pp",
+            "t",
+            "kw",
+            "origin",
+        ],
     ),
     ("youtu.be", &["si", "t", "feature"]),
     // google result/share links append ved/ei/sclient/referrer

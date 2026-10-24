@@ -304,8 +304,7 @@ pub fn feed_links(body: &str) -> Vec<String> {
             let end = if start == 1 {
                 rest_q.find(terminator)
             } else {
-                rest_q
-                    .find(|c: char| c == '>' || c == ' ' || c == '"' || c == '\'')
+                rest_q.find(['>', ' ', '"', '\''])
             };
             if let Some(rel) = end {
                 let l = rest_q[..rel].trim();

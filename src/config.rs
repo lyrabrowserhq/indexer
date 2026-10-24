@@ -253,10 +253,10 @@ impl Config {
         if let Ok(v) = std::env::var("LYRA_API_TOKEN") {
             self.api.token = v;
         }
-        if let Ok(v) = std::env::var("LYRA_API_BODY_LIMIT") {
-            if let Ok(n) = v.parse() {
-                self.api.body_limit = n;
-            }
+        if let Ok(v) = std::env::var("LYRA_API_BODY_LIMIT")
+            && let Ok(n) = v.parse()
+        {
+            self.api.body_limit = n;
         }
         if let Ok(v) = std::env::var("INDEX_DIR").or_else(|_| std::env::var("LYRA_INDEX_DIR")) {
             self.store.path = std::path::PathBuf::from(v);

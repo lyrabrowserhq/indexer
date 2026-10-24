@@ -211,8 +211,7 @@ pub fn skip_index_url(url: &url::Url) -> bool {
         if sl == "amp" {
             return true;
         }
-        if (sl == "tag" || sl == "category" || sl == "author" || sl == "page")
-            && i + 1 < segs.len()
+        if (sl == "tag" || sl == "category" || sl == "author" || sl == "page") && i + 1 < segs.len()
         {
             return true;
         }
@@ -236,9 +235,7 @@ pub fn skip_index_url(url: &url::Url) -> bool {
                 | "checkout"
         )
     };
-    if segs
-        .first()
-        .is_some_and(|s| edge(&s.to_ascii_lowercase()))
+    if segs.first().is_some_and(|s| edge(&s.to_ascii_lowercase()))
         || segs.last().is_some_and(|s| edge(&s.to_ascii_lowercase()))
     {
         return true;
@@ -258,7 +255,9 @@ pub fn skip_index_url(url: &url::Url) -> bool {
     let is_year = |s: &str| {
         s.len() == 4
             && all_digits(s)
-            && s.parse::<u32>().map(|y| (1900..=2100).contains(&y)).unwrap_or(false)
+            && s.parse::<u32>()
+                .map(|y| (1900..=2100).contains(&y))
+                .unwrap_or(false)
     };
     let is_monthday = |s: &str| s.len() <= 2 && all_digits(s);
     if let Some(last) = segs.last() {
@@ -271,10 +270,13 @@ pub fn skip_index_url(url: &url::Url) -> bool {
         }
     }
     // search and share endpoints are not content
-    if let Some(q) = url.query() {
-        if q.contains("replytocom") || q.starts_with("s=") || q.contains("&s=") || q.contains("share=") {
-            return true;
-        }
+    if let Some(q) = url.query()
+        && (q.contains("replytocom")
+            || q.starts_with("s=")
+            || q.contains("&s=")
+            || q.contains("share="))
+    {
+        return true;
     }
     false
 }
