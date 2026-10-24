@@ -5,6 +5,15 @@ on:
     branches: [master]
     tags: ["v*"]
   pull_request:
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+      - "docker/**"
+      - "seeds.txt"
+      - ".github/workflows/docker.yml"
 
 permissions:
   contents: read
